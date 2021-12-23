@@ -6,20 +6,12 @@ pragma solidity 0.6.12;
 
 import "@pancakeswap/pancake-swap-lib/contracts/token/BEP20/BEP20.sol";
 import "@pancakeswap/pancake-swap-lib/contracts/token/BEP20/SafeBEP20.sol";
+import '@pancakeswap/pancake-swap-lib/contracts/access/Ownable.sol';
 
-contract LBDPuppy is BEP20('LBD PUPPY', 'LBD-P') {
+contract LBDPuppy is Ownable {
     using SafeBEP20 for BEP20;
 
-    /// @notice Creates `_amount` token to `_to`. Must only be called by the owner.
-    function mint(address _to, uint256 _amount) public onlyOwner {
-        _mint(_to, _amount);
-    }
-
-    function burn(address _from ,uint256 _amount) public onlyOwner {
-        _burn(_from, _amount);
-    }
-
-    BEP20 public token;
+    BEP20 public immutable token;
 
 
     constructor(
@@ -29,16 +21,16 @@ contract LBDPuppy is BEP20('LBD PUPPY', 'LBD-P') {
     }
 
     // Safe token transfer function, just in case if rounding error causes pool to not have enough LBDs.
-    function safeLBDTransfer(address _to, uint256 _amount) public onlyOwner {
+    function safeLBDTransfer(address _to, uint256 _amount) external onlyOwner {
         uint256 lbdBal = token.balanceOf(address(this));
         if (_amount > lbdBal) {
-            token.transfer(_to, lbdBal);
+            token.safeTransfer(_to, lbdBal);
         } else {
-            token.transfer(_to, _amount);
+            token.safeTransfer(_to, _amount);
         }
     }
 
-    function deposit (uint256 _amount) public {
+    function deposit (uint256 _amount) external {
         token.safeTransferFrom(msg.sender, address(this), _amount);
     }
 }
