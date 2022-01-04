@@ -24,9 +24,13 @@ contract LBDPuppy is Ownable {
     function safeLBDTransfer(address _to, uint256 _amount) external onlyOwner {
         uint256 lbdBal = token.balanceOf(address(this));
         if (_amount > lbdBal) {
-            token.safeTransfer(_to, lbdBal);
+            if (lbdBal > 0)
+                // 0 transfers not supported by LBD contract
+                token.safeTransfer(_to, lbdBal);
         } else {
-            token.safeTransfer(_to, _amount);
+            if (_amount > 0)
+                // 0 transfers not supported by LBD contract
+                token.safeTransfer(_to, _amount);
         }
     }
 

@@ -12,7 +12,7 @@ import '@pancakeswap/pancake-swap-lib/contracts/utils/ReentrancyGuard.sol';
 
 import "./LBDPuppy.sol";
 
-contract MasterLPD is Ownable, ReentrancyGuard {
+contract MasterLBD is Ownable, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeBEP20 for IBEP20;
 
@@ -40,6 +40,7 @@ contract MasterLPD is Ownable, ReentrancyGuard {
         uint256 lastRewardBlock;  // Last block number that LBDs distribution occurs.
         uint256 accLBDPerShare; // Accumulated LBDs per share, times DECIMALS. See below.
         uint256 totalStaked;    // total staked tokens
+        uint256 feeBase;
     }
 
     // The LBD TOKEN!
@@ -61,6 +62,7 @@ contract MasterLPD is Ownable, ReentrancyGuard {
     uint256 public startBlock;
     uint256 public endBlock;
     uint256 public constant DECIMALS = 1e18;
+    uint256 public constant FEE_DECIMALS = 1e4;
     uint256 public MAX_EMISSION_RATE = 0;
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
@@ -73,6 +75,7 @@ contract MasterLPD is Ownable, ReentrancyGuard {
     event StopReward(uint256 stopBLock);
     event UpdateDev(address devAddr);
     event EmergencyRewardWithdraw(address sender, uint256 reward);
+    event SkimStakeTokenFees(address indexed user, uint256 amount);
 
     constructor(
         BEP20 _token,
@@ -97,7 +100,8 @@ contract MasterLPD is Ownable, ReentrancyGuard {
             allocPoint: 1000,
             lastRewardBlock: startBlock,
             accLBDPerShare: 0,
-            totalStaked: 0
+            totalStaked: 0,
+            feeBase: 0
         }));
 
         totalAllocPoint = 1000;
@@ -121,10 +125,11 @@ contract MasterLPD is Ownable, ReentrancyGuard {
 
     // Add a new lp to the pool. Can only be called by the owner.
     // XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
-    function add(uint256 _allocPoint, IBEP20 _lpToken, bool _withUpdate) external onlyOwner nonDuplicated(_lpToken) {
+    function add(uint256 _allocPoint, IBEP20 _lpToken, uint256 _feeBase, bool _withUpdate) external onlyOwner nonDuplicated(_lpToken) {
         if (_withUpdate) {
             massUpdatePools();
         }
+        require (_feeBase <= 1000, "Fee base: Fee base too high");
         // BEP20 interface check
         _lpToken.balanceOf(address(this));
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
@@ -134,7 +139,8 @@ contract MasterLPD is Ownable, ReentrancyGuard {
             allocPoint: _allocPoint,
             lastRewardBlock: lastRewardBlock,
             accLBDPerShare: 0,
-            totalStaked: 0
+            totalStaked: 0,
+            feeBase: _feeBase
         }));
         poolExistence[_lpToken] = true;
         updateStakingPool();
@@ -142,12 +148,14 @@ contract MasterLPD is Ownable, ReentrancyGuard {
     }
 
     // Update the given pool's LBD allocation point. Can only be called by the owner.
-    function set(uint256 _pid, uint256 _allocPoint, bool _withUpdate) external onlyOwner {
+    function set(uint256 _pid, uint256 _allocPoint, uint256 _feeBase, bool _withUpdate) external onlyOwner {
         if (_withUpdate) {
             massUpdatePools();
         }
+        require (_feeBase <= 1000, "Fee base: Fee base too high");
         uint256 prevAllocPoint = poolInfo[_pid].allocPoint;
         poolInfo[_pid].allocPoint = _allocPoint;
+        poolInfo[_pid].feeBase = _feeBase;
         if (prevAllocPoint != _allocPoint) {
             totalAllocPoint = totalAllocPoint.sub(prevAllocPoint).add(_allocPoint);
             updateStakingPool();
@@ -200,7 +208,7 @@ contract MasterLPD is Ownable, ReentrancyGuard {
         if (block.number > pool.lastRewardBlock && lpSupply != 0 && totalAllocPoint > 0) {
             uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
             uint256 cakeReward = multiplier.mul(lbdPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
-            uint256 devFee = cakeReward.div(100);
+            uint256 devFee = cakeReward.mul(3).div(100);
             accLBDPerShare = accLBDPerShare.add(cakeReward.sub(devFee).mul(DECIMALS).div(lpSupply));
         }
         return user.amount.mul(accLBDPerShare).div(DECIMALS).sub(user.rewardDebt);
@@ -229,9 +237,9 @@ contract MasterLPD is Ownable, ReentrancyGuard {
         uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
         uint256 tokenReward = multiplier.mul(lbdPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
         // 1% dev fee
-        uint256 devFee = tokenReward.div(100);
+        uint256 devFee = tokenReward.mul(3).div(100);
         safeLBDTransfer(devaddr, devFee);
-        // compute new share deducted by dev fee (1%)
+        // compute new share deducted by dev fee (3%)
         pool.accLBDPerShare = pool.accLBDPerShare.add(tokenReward.sub(devFee).mul(DECIMALS).div(lpSupply));
         pool.lastRewardBlock = block.number;
     }
@@ -276,7 +284,10 @@ contract MasterLPD is Ownable, ReentrancyGuard {
         }
         if(_amount > 0) {
             user.amount = user.amount.sub(_amount);
-            pool.lpToken.safeTransfer(msg.sender, _amount);
+            uint256 penaltyFee = _amount.mul(pool.feeBase).div(FEE_DECIMALS);
+            if (penaltyFee > 0)
+                pool.lpToken.safeTransfer(devaddr, penaltyFee);
+            pool.lpToken.safeTransfer(msg.sender, _amount.sub(penaltyFee));
         }
         user.rewardDebt = user.amount.mul(pool.accLBDPerShare).div(DECIMALS);
         pool.totalStaked = pool.totalStaked.sub(_amount);
@@ -335,19 +346,33 @@ contract MasterLPD is Ownable, ReentrancyGuard {
         user.rewardDebt = 0;
         // updates total staked balance
         pool.totalStaked = pool.totalStaked.sub(_amount);
+        uint256 penaltyFee = 0;
+        if (_pid != 0) {
+            // staking pool can never have an unstaking fee
+            penaltyFee = _amount.mul(pool.feeBase).div(FEE_DECIMALS);
+            if (penaltyFee > 0)
+                pool.lpToken.safeTransfer(devaddr, penaltyFee);
+        }
         // sends token to message sender
-        pool.lpToken.safeTransfer(msg.sender, _amount);
+        pool.lpToken.safeTransfer(msg.sender, _amount.sub(penaltyFee));
         emit EmergencyWithdraw(msg.sender, _pid, _amount);
     }
 
     /// @dev Obtain the stake token fees (if any) earned by reflect token
-    function getTokenFeeBalance(uint256 _pid) external view returns (uint256) {
+    function getTokenFeeBalance(uint256 _pid) public view returns (uint256) {
         return totalTokenBalance(_pid).sub(poolInfo[_pid].totalStaked);
     }
 
     function totalTokenBalance(uint256 _pid) public view returns (uint256) {
         // Return BEO20 balance
         return poolInfo[_pid].lpToken.balanceOf(address(this));
+    }
+
+        /// @dev Remove excess stake tokens earned by reflect fees
+    function skimStakeTokenFees(uint256 _pid) external onlyOwner {
+        uint256 stakeTokenFeeBalance = getTokenFeeBalance(_pid);
+        poolInfo[_pid].lpToken.safeTransfer(msg.sender, stakeTokenFeeBalance);
+        emit SkimStakeTokenFees(msg.sender, stakeTokenFeeBalance);
     }
 
     function getPoolInfo(uint256 _pid) external view
